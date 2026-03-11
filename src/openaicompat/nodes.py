@@ -1,118 +1,165 @@
-from inspect import cleandoc
-class Example:
-    """
-    A example node
+import json
+import urllib.request
+import urllib.error
+import base64
+from io import BytesIO
+from PIL import Image
+import torch
+import numpy as np
 
-    Class methods
-    -------------
-    INPUT_TYPES (dict):
-        Tell the main program input parameters of nodes.
-    IS_CHANGED:
-        optional method to control when the node is re executed.
-
-    Attributes
-    ----------
-    RETURN_TYPES (`tuple`):
-        The type of each element in the output tulple.
-    RETURN_NAMES (`tuple`):
-        Optional: The name of each output in the output tulple.
-    FUNCTION (`str`):
-        The name of the entry-point method. For example, if `FUNCTION = "execute"` then it will run Example().execute()
-    OUTPUT_NODE ([`bool`]):
-        If this node is an output node that outputs a result/image from the graph. The SaveImage node is an example.
-        The backend iterates on these output nodes and tries to execute all their parents if their parent graph is properly connected.
-        Assumed to be False if not present.
-    CATEGORY (`str`):
-        The category the node should appear in the UI.
-    execute(s) -> tuple || None:
-        The entry point method. The name of this method must be the same as the value of property `FUNCTION`.
-        For example, if `FUNCTION = "execute"` then this method's name must be `execute`, if `FUNCTION = "foo"` then it must be `foo`.
+class OpenAICompatChatNode:
     """
-    def __init__(self):
-        pass
+    A generic OpenAI API compatible chat node.
+    Allows connecting to any LLM that supports the OpenAI chat/completions endpoint format.
+    """
 
     @classmethod
     def INPUT_TYPES(s):
-        """
-            Return a dictionary which contains config for all input fields.
-            Some types (string): "MODEL", "VAE", "CLIP", "CONDITIONING", "LATENT", "IMAGE", "INT", "STRING", "FLOAT".
-            Input types "INT", "STRING" or "FLOAT" are special values for fields on the node.
-            The type can be a list for selection.
-
-            Returns: `dict`:
-                - Key input_fields_group (`string`): Can be either required, hidden or optional. A node class must have property `required`
-                - Value input_fields (`dict`): Contains input fields config:
-                    * Key field_name (`string`): Name of a entry-point method's argument
-                    * Value field_config (`tuple`):
-                        + First value is a string indicate the type of field or a list for selection.
-                        + Secound value is a config for type "INT", "STRING" or "FLOAT".
-        """
         return {
             "required": {
-                "image": ("Image", { "tooltip": "This is an image"}),
-                "int_field": ("INT", {
-                    "default": 0,
-                    "min": 0, #Minimum value
-                    "max": 4096, #Maximum value
-                    "step": 64, #Slider's step
-                    "display": "number" # Cosmetic only: display as "number" or "slider"
+                "api_url": ("STRING", {
+                    "default": "https://api.openai.com/v1",
+                    "tooltip": "Base URL or full endpoint URL (e.g., https://api.openai.com/v1 or https://api.openai.com/v1/chat/completions)."
                 }),
-                "float_field": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 10.0,
-                    "step": 0.01,
-                    "round": 0.001, #The value represeting the precision to round to, will be set to the step value by default. Can be set to False to disable rounding.
-                    "display": "number"}),
-                "print_to_screen": (["enable", "disable"],),
-                "string_field": ("STRING", {
-                    "multiline": False, #True if you want the field to look like the one on the ClipTextEncode node
-                    "default": "Hello World!"
+                "model": ("STRING", {
+                    "default": "gpt-4o",
+                    "tooltip": "The model ID to use (e.g., gpt-4o, gemini-1.5-pro)."
+                }),
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "Describe this image in detail.",
+                    "tooltip": "The user prompt."
                 }),
             },
+            "optional": {
+                "system_prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "You are a helpful assistant.",
+                    "tooltip": "Optional system instructions."
+                }),
+                "api_key": ("STRING", {
+                    "default": "",
+                    "tooltip": "Optional API key for authorization."
+                }),
+                "image": ("IMAGE", {
+                    "tooltip": "Optional input image(s). If a batch is provided, each image is processed individually."
+                }),
+            }
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    #RETURN_NAMES = ("image_output_name",)
-    DESCRIPTION = cleandoc(__doc__)
-    FUNCTION = "test"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "generate"
+    CATEGORY = "OpenAIcompat"
 
-    #OUTPUT_NODE = False
-    #OUTPUT_TOOLTIPS = ("",) # Tooltips for the output node
+    def _tensor_to_base64_jpeg(self, tensor):
+        """Converts a ComfyUI image tensor [H, W, C] to a base64 encoded JPEG string."""
+        i = 255. * tensor.cpu().numpy()
+        img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+        buffered = BytesIO()
+        img.save(buffered, format="JPEG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{img_str}"
 
-    CATEGORY = "Example"
+    def _make_request(self, endpoint_url, headers, payload):
+        """Makes the HTTP POST request to the API."""
+        req = urllib.request.Request(
+            endpoint_url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers=headers,
+            method='POST'
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0]["message"]["content"]
+                else:
+                    return f"Error: Unexpected response format: {result}"
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8')
+            return f"HTTP Error {e.code}: {e.reason}\nDetails: {error_body}"
+        except urllib.error.URLError as e:
+            return f"URL Error: {e.reason}"
+        except Exception as e:
+             return f"Error: {str(e)}"
 
-    def test(self, image, string_field, int_field, float_field, print_to_screen):
-        if print_to_screen == "enable":
-            print(f"""Your input contains:
-                string_field aka input text: {string_field}
-                int_field: {int_field}
-                float_field: {float_field}
-            """)
-        #do some processing on the image, in this example I just invert it
-        image = 1.0 - image
-        return (image,)
+    def generate(self, api_url, model, prompt, system_prompt="", api_key="", image=None):
+        # Format the endpoint URL
+        endpoint_url = api_url.strip()
+        if endpoint_url.endswith("/"):
+            endpoint_url = endpoint_url[:-1]
+            
+        if not endpoint_url.endswith("/chat/completions"):
+            endpoint_url += "/chat/completions"
 
-    """
-        The node will always be re executed if any of the inputs change but
-        this method can be used to force the node to execute again even when the inputs don't change.
-        You can make this node return a number or a string. This value will be compared to the one returned the last time the node was
-        executed, if it is different the node will be executed again.
-        This method is used in the core repo for the LoadImage node where they return the image hash as a string, if the image hash
-        changes between executions the LoadImage node is executed again.
-    """
-    #@classmethod
-    #def IS_CHANGED(s, image, string_field, int_field, float_field, print_to_screen):
-    #    return ""
+        # Prepare headers
+        headers = {
+            "Content-Type": "application/json"
+        }
+        if api_key and isinstance(api_key, str) and api_key.strip():
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
 
+        responses = []
 
-# A dictionary that contains all nodes you want to export with their names
-# NOTE: names should be globally unique
+        if image is not None:
+            # image is a tensor of shape [batch_size, height, width, channels]
+            # Process each image in the batch individually
+            for i in range(image.shape[0]):
+                single_image_tensor = image[i]
+                base64_image = self._tensor_to_base64_jpeg(single_image_tensor)
+                
+                messages = []
+                if system_prompt and isinstance(system_prompt, str) and system_prompt.strip():
+                    messages.append({"role": "system", "content": system_prompt})
+                
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": base64_image
+                            }
+                        }
+                    ]
+                })
+
+                payload = {
+                    "model": model,
+                    "messages": messages
+                }
+
+                response_text = self._make_request(endpoint_url, headers, payload)
+                responses.append(response_text)
+            
+            # If it was a batch of 1, return the single string (more compatible with other nodes)
+            # If it was > 1, return the list. ComfyUI can handle lists for batched string processing.
+            if len(responses) == 1:
+                 return (responses[0],)
+            return (responses,)
+            
+        else:
+            # No image provided, just text chat
+            messages = []
+            if system_prompt and isinstance(system_prompt, str) and system_prompt.strip():
+                messages.append({"role": "system", "content": system_prompt})
+            
+            messages.append({"role": "user", "content": prompt})
+
+            payload = {
+                "model": model,
+                "messages": messages
+            }
+
+            response_text = self._make_request(endpoint_url, headers, payload)
+            return (response_text,)
+
 NODE_CLASS_MAPPINGS = {
-    "Example": Example
+    "OpenAICompatChatNode": OpenAICompatChatNode
 }
 
-# A dictionary that contains the friendly/humanly readable titles for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Example": "Example Node"
+    "OpenAICompatChatNode": "OpenAI Chat (Compatible)"
 }
